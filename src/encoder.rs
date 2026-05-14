@@ -57,8 +57,14 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-i").arg(input_path);
     
-    // Map video stream
-    cmd.arg("-map").arg(format!("0:{}", video_info.video_stream_order));
+    // Map streams using ffmpeg's stream specifiers (more reliable, ignores cover art)
+    // v:0 = first video stream, a = all audio, s = all subtitles
+    cmd.arg("-map").arg("0:v:0");
+    cmd.arg("-map").arg("0:a");
+    
+    if !video_info.subtitle_tracks.is_empty() {
+        cmd.arg("-map").arg("0:s");
+    }
     
     // Video encoding
     let video_bitrate = determine_video_bitrate(cli, &video_info)?;
@@ -89,12 +95,7 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
     cmd.arg("-speed").arg(&speed);
     println!("  Speed: {:?} (deadline: {}, speed: {})", cli.speed, deadline, speed);
     
-    // Map audio streams
-    for track in &video_info.audio_tracks {
-        cmd.arg("-map").arg(format!("0:{}", track.stream_order));
-    }
-    
-    // Audio encoding (single declaration)
+    // Audio encoding
     cmd.arg("-c:a").arg("libopus");
     
     let mut target_audio_bitrates = Vec::new();
@@ -111,7 +112,6 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
             auto_br
         };
         
-        // Apply bitrate and channel count (using k suffix)
         cmd.arg(format!("-b:a:{}", idx)).arg(format!("{}k", br / 1000));
         cmd.arg(format!("-ac:a:{}", idx)).arg(track.channels.to_string());
         
@@ -123,20 +123,18 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
         println!("  Total audio target: {:.2} Mbps", target_audio_total_bitrate as f64 / 1_000_000.0);
     }
     
-    // Map subtitle streams (copy without re-encoding)
+    // Subtitles: copy without re-encoding
     if !video_info.subtitle_tracks.is_empty() {
         cmd.arg("-c:s").arg("copy");
-        for track in &video_info.subtitle_tracks {
-            cmd.arg("-map").arg(format!("0:{}", track.stream_order));
-        }
-        println!("  Subtitles: copy without re-encoding ({} track(s))", video_info.subtitle_tracks.len());
     }
     
     // Copy useful metadata but remove statistics
     cmd.arg("-map_metadata").arg("0:g");
     cmd.arg("-map_metadata:s:v").arg("0:s:v");
     cmd.arg("-map_metadata:s:a").arg("0:s:a");
-    cmd.arg("-map_metadata:s:s").arg("0:s:s");
+    if !video_info.subtitle_tracks.is_empty() {
+        cmd.arg("-map_metadata:s:s").arg("0:s:s");
+    }
     
     // Remove statistics metadata for video stream
     cmd.arg("-metadata:s:v").arg("BPS=");
@@ -194,43 +192,37 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
     let output_path_clone = output_path.clone();
     
     let mut last_progress_update = Instant::now();
-    let mut last_time_ms = 0u64;
+    let mut _last_time_ms = 0u64;
     let mut last_encoded_seconds = 0.0;
     let mut first_update = true;
     
     for line in reader.lines() {
         let line = line?;
         if let Some(time_ms) = parse_out_time(&line) {
-            last_time_ms = time_ms;
+            _last_time_ms = time_ms;
             let elapsed = start_time.elapsed().as_secs_f64();
             let encoded_seconds = time_ms as f64 / 1_000_000.0;
             last_encoded_seconds = encoded_seconds;
             let progress_percent = (encoded_seconds / total_duration).min(1.0);
             
-            // Update progress manager (for overall stats, no display)
             progress.update_progress(progress_percent);
             
-            // Update detailed info every second
             if last_progress_update.elapsed().as_secs() >= 1 || first_update {
                 last_progress_update = Instant::now();
                 first_update = false;
                 
-                // Calculate encoding speed (real-time factor)
                 let encoding_speed = if elapsed > 0.0 {
                     encoded_seconds / elapsed
                 } else {
                     0.0
                 };
                 
-                // Calculate ETA
                 let remaining_seconds = if encoding_speed > 0.0 && progress_percent < 1.0 {
                     (total_duration - encoded_seconds) / encoding_speed
                 } else {
                     0.0
                 };
                 
-                // Calculate current bitrate based on output file size and encoded time
-                // Wait 10 seconds to avoid initial spikes
                 let current_bitrate_mbps = if encoded_seconds > 10.0 {
                     if let Ok(metadata) = fs::metadata(&output_path_clone) {
                         let file_size_bits = metadata.len() as f64 * 8.0;
@@ -242,7 +234,6 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
                     None
                 };
                 
-                // Calculate estimated final size
                 let estimated_final_size_mb = if progress_percent > 0.01 {
                     if let Ok(metadata) = fs::metadata(&output_path_clone) {
                         let current_size_mb = metadata.len() as f64 / 1_048_576.0;
@@ -254,20 +245,17 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
                     None
                 };
                 
-                // Create compact progress line
                 let progress_pct = progress_percent * 100.0;
-                let elapsed_min = elapsed / 60.0;
                 let encoded_min = encoded_seconds / 60.0;
                 let eta_min = remaining_seconds / 60.0;
+                let _elapsed_min = elapsed / 60.0;
                 
-                // Build progress bar (30 characters)
                 let bar_width = 30;
                 let filled = (progress_pct / 100.0 * bar_width as f64) as usize;
                 let bar = format!("[{}{}]", 
                     "=".repeat(filled),
                     " ".repeat(bar_width - filled));
                 
-                // Build info string
                 let mut info = format!("{:5.1}% {} {:4.1}/{:4.1}min {:4.2}x",
                     progress_pct, bar, encoded_min, total_duration / 60.0, encoding_speed);
                 
@@ -283,7 +271,6 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
                     info.push_str(&format!(" ->{:.0}MB", est));
                 }
                 
-                // Clear line and print
                 print!("\r\x1b[K{}", info);
                 use std::io::Write;
                 std::io::stdout().flush().unwrap();
@@ -299,7 +286,6 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
         return Err(anyhow!("ffmpeg exited with error code: {:?}", status.code()));
     }
     
-    // Final stats
     let total_elapsed = start_time.elapsed().as_secs_f64();
     let final_encoding_speed = if total_elapsed > 0.0 {
         last_encoded_seconds / total_elapsed
@@ -311,7 +297,6 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
     let final_bitrate_mbps = final_bitrate / 1_000_000.0;
     let gain = source_size as f64 / final_size as f64;
     
-    // Clear line and print final stats
     print!("\r\x1b[K");
     println!("\n✅ Encoding completed!");
     println!("════════════════════════════════════════════════════════════════════");
@@ -321,7 +306,6 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
              final_size as f64 / 1_048_576.0, (1.0 - 1.0/gain) * 100.0);
     println!("  Average bitrate: {:.2} Mbps", final_bitrate_mbps);
     
-    // Compare with target if available
     if let Some(target_br) = target_video_bitrate {
         let target_br_mbps = target_br as f64 / 1_000_000.0;
         let diff = (final_bitrate_mbps - target_br_mbps).abs();
@@ -393,6 +377,34 @@ fn make_unique_path(path: &Path) -> Result<PathBuf> {
     Err(anyhow!("Could not find unique filename for {}", path.display()))
 }
 
+pub fn post_process(cli: &Cli, input_path: &Path, output_path: &Path) -> Result<()> {
+    if cli.delete || cli.rename {
+        let original_name = input_path.file_name().unwrap_or_default();
+        let output_name = output_path.file_name().unwrap_or_default();
+        
+        if cli.delete {
+            println!("\n  Post-processing:");
+            println!("     Deleting source: {}", input_path.display());
+            std::fs::remove_file(input_path)?;
+            println!("     Renaming output: {} -> {}", output_name.to_string_lossy(), original_name.to_string_lossy());
+            let final_path = output_path.parent().unwrap().join(original_name);
+            std::fs::rename(output_path, &final_path)?;
+            println!("     Done");
+        } else if cli.rename {
+            println!("\n  Post-processing:");
+            let old_name = format!("_old_{}", original_name.to_string_lossy());
+            let old_path = input_path.parent().unwrap().join(&old_name);
+            println!("     Renaming source: {} -> {}", input_path.display(), old_path.display());
+            std::fs::rename(input_path, &old_path)?;
+            println!("     Renaming output: {} -> {}", output_name.to_string_lossy(), original_name.to_string_lossy());
+            let final_path = output_path.parent().unwrap().join(original_name);
+            std::fs::rename(output_path, &final_path)?;
+            println!("     Done (original renamed to: {})", old_name);
+        }
+    }
+    Ok(())
+}
+
 fn determine_video_bitrate(cli: &Cli, info: &VideoInfo) -> Result<Option<u32>> {
     if let Some(bitrate_str) = &cli.video_bitrate {
         if bitrate_str == "auto" {
@@ -431,14 +443,14 @@ fn calculate_auto_crf(width: u32, height: u32) -> u32 {
     let pixels = width as u64 * height as u64;
     
     match pixels {
-        p if p < 1_000_000 => 33,      // < 1 Mpx (SD)
-        p if p < 1_500_000 => 32,      // 1-1.5 Mpx (720p)
-        p if p < 2_000_000 => 31,      // 1.5-2 Mpx
-        p if p < 2_500_000 => 28,      // 2-2.5 Mpx (1080p)
-        p if p < 4_000_000 => 26,      // 2.5-4 Mpx
-        p if p < 6_000_000 => 24,      // 4-6 Mpx
-        p if p < 8_000_000 => 22,      // 6-8 Mpx (4K)
-        _ => 20,                       // > 8 Mpx (8K+)
+        p if p < 1_000_000 => 33,
+        p if p < 1_500_000 => 32,
+        p if p < 2_000_000 => 31,
+        p if p < 2_500_000 => 28,
+        p if p < 4_000_000 => 26,
+        p if p < 6_000_000 => 24,
+        p if p < 8_000_000 => 22,
+        _ => 20,
     }
 }
 
@@ -446,14 +458,14 @@ fn calculate_auto_bitrate(width: u32, height: u32) -> u32 {
     let pixels = width as u64 * height as u64;
     
     match pixels {
-        p if p < 1_000_000 => 1_000_000,      // < 1 Mpx: 1 Mbps
-        p if p < 1_500_000 => 1_500_000,      // 1-1.5 Mpx: 1.5 Mbps
-        p if p < 2_000_000 => 2_000_000,      // 1.5-2 Mpx: 2 Mbps
-        p if p < 2_500_000 => 3_000_000,      // 2-2.5 Mpx: 3 Mbps (1080p)
-        p if p < 4_000_000 => 4_000_000,      // 2.5-4 Mpx: 4 Mbps
-        p if p < 6_000_000 => 6_000_000,      // 4-6 Mpx: 6 Mbps
-        p if p < 8_000_000 => 8_000_000,      // 6-8 Mpx: 8 Mbps (4K)
-        _ => 12_000_000,                       // > 8 Mpx: 12 Mbps
+        p if p < 1_000_000 => 1_000_000,
+        p if p < 1_500_000 => 1_500_000,
+        p if p < 2_000_000 => 2_000_000,
+        p if p < 2_500_000 => 3_000_000,
+        p if p < 4_000_000 => 4_000_000,
+        p if p < 6_000_000 => 6_000_000,
+        p if p < 8_000_000 => 8_000_000,
+        _ => 12_000_000,
     }
 }
 
@@ -489,30 +501,3 @@ fn parse_out_time(line: &str) -> Option<u64> {
     }
 }
 
-pub fn post_process(cli: &Cli, input_path: &Path, output_path: &Path) -> Result<()> {
-    if cli.delete || cli.rename {
-        let original_name = input_path.file_name().unwrap_or_default();
-        let output_name = output_path.file_name().unwrap_or_default();
-        
-        if cli.delete {
-            println!("\n  Post-processing:");
-            println!("     Deleting source: {}", input_path.display());
-            std::fs::remove_file(input_path)?;
-            println!("     Renaming output: {} -> {}", output_name.to_string_lossy(), original_name.to_string_lossy());
-            let final_path = output_path.parent().unwrap().join(original_name);
-            std::fs::rename(output_path, &final_path)?;
-            println!("     Done");
-        } else if cli.rename {
-            println!("\n  Post-processing:");
-            let old_name = format!("_old_{}", original_name.to_string_lossy());
-            let old_path = input_path.parent().unwrap().join(&old_name);
-            println!("     Renaming source: {} -> {}", input_path.display(), old_path.display());
-            std::fs::rename(input_path, &old_path)?;
-            println!("     Renaming output: {} -> {}", output_name.to_string_lossy(), original_name.to_string_lossy());
-            let final_path = output_path.parent().unwrap().join(original_name);
-            std::fs::rename(output_path, &final_path)?;
-            println!("     Done (original renamed to: {})", old_name);
-        }
-    }
-    Ok(())
-}
