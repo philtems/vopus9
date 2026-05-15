@@ -39,12 +39,16 @@ pub struct Cli {
     #[arg(long, conflicts_with = "video_bitrate")]
     pub crf: Option<String>,
 
+    /// Minimum CRF value when using bitrate mode (default: 8)
+    #[arg(long, default_value = "8", requires = "video_bitrate")]
+    pub bv_min_crf: u32,
+
     /// Encoding speed: low, medium, or fast (default: fast)
     #[arg(short, long, default_value = "fast")]
     pub speed: Speed,
 
     /// Display video information only, no encoding
-    #[arg(short, long)]
+    #[arg(long)]  // Changé: plus de short pour éviter conflit avec --input
     pub info: bool,
 
     /// Delete source file after successful encoding and rename output to original name
@@ -54,6 +58,14 @@ pub struct Cli {
     /// Rename output to original name, source renamed to _old_xxx
     #[arg(long)]
     pub rename: bool,
+
+    /// Skip encoding if video codec is already VP9
+    #[arg(long)]
+    pub skip_vp9: bool,
+
+    /// Change video framerate (default: keep original)
+    #[arg(long)]
+    pub fps: Option<f64>,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]

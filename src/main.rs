@@ -105,35 +105,68 @@ fn handle_info_mode(cli: &Cli) -> Result<()> {
         return Ok(());
     }
     
-    print_banner();
     println!("\nVideo Information\n");
-    println!("{:-<60}", "");
+    println!("{:=<80}", "");
     
     for video_path in &videos {
         match VideoInfo::from_file(video_path) {
             Ok(info) => {
-                println!("\nFile: {}", video_path.display());
-                println!("  Duration: {:.2} seconds ({:.2} minutes)", info.duration, info.duration / 60.0);
-                println!("  Resolution: {}x{}", info.width, info.height);
-                println!("  Video codec: {}", info.video_codec);
-                println!("  Audio tracks: {}", info.audio_tracks.len());
-                for track in &info.audio_tracks {
-                    println!("    - Track {}: {} channels, language: {}, codec: {}", 
-                             track.stream_order, track.channels, track.language, track.codec);
+                let file_size_mb = info.file_size as f64 / 1_048_576.0;
+                let duration_min = info.duration / 60.0;
+                let pixels = info.width as u64 * info.height as u64;
+                let category = match info.get_resolution_category() {
+                    video_info::ResolutionCategory::LessThan720p => "<720p",
+                    video_info::ResolutionCategory::P720 => "720p",
+                    video_info::ResolutionCategory::P1080 => "1080p",
+                    video_info::ResolutionCategory::P2160 => "4K",
+                };
+                
+                println!("\n📹 File: {}", video_path.display());
+                println!("{:=<80}", "");
+                println!("  📊 General Information:");
+                println!("     • Size: {:.2} MB ({:.2} GB)", file_size_mb, file_size_mb / 1024.0);
+                println!("     • Duration: {:.2} seconds ({:.2} minutes)", info.duration, duration_min);
+                println!("     • Estimated total bitrate: {:.2} Mbps", info.estimated_bitrate);
+                
+                println!("\n  🎬 Video Stream:");
+                println!("     • Resolution: {}x{} ({:.1} Mpx) - {}", 
+                         info.width, info.height, pixels as f64 / 1_000_000.0, category);
+                println!("     • Codec: {}", info.video_codec);
+                if let Some(fps) = info.framerate {
+                    println!("     • Framerate: {:.2} fps", fps);
                 }
-                println!("  Subtitle tracks: {}", info.subtitle_tracks.len());
-                for track in &info.subtitle_tracks {
-                    println!("    - Track {}: language: {}, codec: {}", 
-                             track.stream_order, track.language, track.codec);
+                if info.is_vp9() {
+                    println!("     • Status: ✓ Already VP9 encoded");
+                }
+                
+                println!("\n  🔊 Audio Streams ({} track(s)):", info.audio_tracks.len());
+                for track in &info.audio_tracks {
+                    let track_bitrate = match track.channels {
+                        0 | 1 | 2 => "~128 kbps",
+                        3 | 4 | 5 => "~256 kbps",
+                        6 | 7 => "~384 kbps",
+                        _ => "~512 kbps",
+                    };
+                    println!("     • Track {}: {} channels, language: {}, codec: {} ({})", 
+                             track.stream_order, track.channels, track.language, track.codec, track_bitrate);
+                }
+                
+                if !info.subtitle_tracks.is_empty() {
+                    println!("\n  📝 Subtitle Streams ({} track(s)):", info.subtitle_tracks.len());
+                    for track in &info.subtitle_tracks {
+                        println!("     • Track {}: language: {}, codec: {}", 
+                                 track.stream_order, track.language, track.codec);
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Error reading {}: {}", video_path.display(), e);
+                eprintln!("\n❌ Error reading {}: {}", video_path.display(), e);
             }
         }
     }
     
-    println!("\n{:-<60}", "");
+    println!("\n{:=<80}", "");
+    println!("\n💡 Tip: Use --help to see encoding options\n");
     Ok(())
 }
 

@@ -11,6 +11,17 @@ use std::time::Instant;
 pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager) -> Result<()> {
     let video_info = VideoInfo::from_file(input_path)?;
     
+    // Check if we should skip VP9 encoding
+    if cli.skip_vp9 && video_info.is_vp9() {
+        println!("\n════════════════════════════════════════════════════════════════════");
+        println!("⏭️  SKIPPING: {} (already VP9)", input_path.file_name().unwrap_or_default().to_string_lossy());
+        println!("════════════════════════════════════════════════════════════════════");
+        println!("  Video codec: {} - No encoding needed", video_info.video_codec);
+        println!("  Use --skip-vp9 flag to process anyway");
+        println!("════════════════════════════════════════════════════════════════════\n");
+        return Ok(());
+    }
+    
     // Determine output path
     let output_path = determine_output_path(cli, input_path)?;
     
@@ -35,6 +46,9 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
     println!("  Size: {:.2} MB", source_size_mb);
     println!("  Estimated source bitrate: {:.2} Mbps", source_bitrate_estimate);
     println!("  Video codec: {}", video_info.video_codec);
+    if let Some(fps) = video_info.framerate {
+        println!("  Framerate: {:.2} fps", fps);
+    }
     println!("  Audio tracks: {}", video_info.audio_tracks.len());
     for track in &video_info.audio_tracks {
         let source_br = match track.channels {
@@ -77,6 +91,11 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
     if let Some(bitrate) = video_bitrate {
         println!("  Video target bitrate: {} bps ({:.2} Mbps)", bitrate, bitrate as f64 / 1_000_000.0);
         cmd.arg("-b:v").arg(bitrate.to_string());
+        
+        // Add minimum CRF to force bitrate compliance (fix for ffmpeg VP9 bitrate issue)
+        println!("  Force minimum quality: CRF {}", cli.bv_min_crf);
+        cmd.arg("-crf").arg(cli.bv_min_crf.to_string());
+        
         target_video_bitrate = Some(bitrate);
     } else if let Some(crf) = crf_value {
         println!("  Video CRF: {} (quality-based, variable bitrate)", crf);
@@ -87,6 +106,18 @@ pub fn encode_video(cli: &Cli, input_path: &Path, progress: &mut ProgressManager
         println!("  Video CRF: {} (auto, based on {}x{})", crf, video_info.width, video_info.height);
         cmd.arg("-crf").arg(crf.to_string());
         target_video_bitrate = None;
+    }
+    
+    // Framerate adjustment if requested
+    if let Some(fps) = cli.fps {
+        println!("  Framerate: changing from {} to {} fps", 
+                 video_info.framerate.map_or("?".to_string(), |f| format!("{:.2}", f)), 
+                 fps);
+        cmd.arg("-r").arg(fps.to_string());
+        cmd.arg("-g").arg(((fps * 10.0) as u32).to_string()); // GOP size: 10 seconds
+    } else if let Some(original_fps) = video_info.framerate {
+        cmd.arg("-r").arg(original_fps.to_string());
+        cmd.arg("-g").arg(((original_fps * 10.0) as u32).to_string());
     }
     
     // Speed settings
